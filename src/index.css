@@ -1,0 +1,165 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Space+Grotesk:wght@300..700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 220 25% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 25% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 25% 10%;
+
+    --primary: 215 80% 48%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 25% 93%;
+    --secondary-foreground: 220 25% 20%;
+
+    --muted: 210 20% 95%;
+    --muted-foreground: 215 15% 50%;
+
+    --accent: 175 60% 40%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 20% 88%;
+    --input: 214 20% 88%;
+    --ring: 215 80% 48%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 220 25% 8%;
+    --sidebar-foreground: 210 20% 85%;
+    --sidebar-primary: 215 80% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 20% 15%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 220 15% 18%;
+    --sidebar-ring: 215 80% 48%;
+
+    /* Custom tokens */
+    --success: 152 60% 42%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --blueprint: 215 80% 48%;
+    --blueprint-light: 215 70% 94%;
+    --blueprint-grid: 215 40% 90%;
+    
+    --font-heading: 'Space Grotesk', sans-serif;
+    --font-body: 'DM Sans', sans-serif;
+
+    --gradient-primary: linear-gradient(135deg, hsl(215, 80%, 48%), hsl(195, 80%, 45%));
+    --gradient-accent: linear-gradient(135deg, hsl(175, 60%, 40%), hsl(195, 70%, 45%));
+    --gradient-dark: linear-gradient(135deg, hsl(220, 25%, 8%), hsl(220, 20%, 15%));
+    --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.04), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+    --shadow-elevated: 0 10px 25px -5px rgb(0 0 0 / 0.08), 0 8px 10px -6px rgb(0 0 0 / 0.04);
+    --shadow-glow: 0 0 20px hsl(215, 80%, 48%, 0.15);
+  }
+
+  .dark {
+    --background: 220 25% 6%;
+    --foreground: 210 20% 95%;
+
+    --card: 220 25% 9%;
+    --card-foreground: 210 20% 95%;
+
+    --popover: 220 25% 9%;
+    --popover-foreground: 210 20% 95%;
+
+    --primary: 215 80% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 20% 15%;
+    --secondary-foreground: 210 20% 90%;
+
+    --muted: 220 15% 14%;
+    --muted-foreground: 215 15% 55%;
+
+    --accent: 175 60% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 18%;
+    --input: 220 15% 18%;
+    --ring: 215 80% 55%;
+
+    --sidebar-background: 220 25% 5%;
+    --sidebar-foreground: 210 20% 85%;
+    --sidebar-primary: 215 80% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 20% 12%;
+    --sidebar-accent-foreground: 210 20% 90%;
+    --sidebar-border: 220 15% 14%;
+    --sidebar-ring: 215 80% 55%;
+
+    --success: 152 60% 42%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --blueprint: 215 80% 55%;
+    --blueprint-light: 220 25% 12%;
+    --blueprint-grid: 220 15% 14%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+  }
+}
+
+@layer components {
+  .blueprint-grid {
+    background-image: 
+      linear-gradient(hsl(var(--blueprint-grid)) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--blueprint-grid)) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+
+  .gradient-primary {
+    background: var(--gradient-primary);
+  }
+
+  .gradient-accent {
+    background: var(--gradient-accent);
+  }
+
+  .gradient-dark {
+    background: var(--gradient-dark);
+  }
+
+  .shadow-card {
+    box-shadow: var(--shadow-card);
+  }
+
+  .shadow-elevated {
+    box-shadow: var(--shadow-elevated);
+  }
+
+  .shadow-glow {
+    box-shadow: var(--shadow-glow);
+  }
+
+  .glass-card {
+    @apply bg-card/80 backdrop-blur-sm border border-border/50;
+  }
+}

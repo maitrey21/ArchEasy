@@ -1,0 +1,63 @@
+<!--
+  ArchFinish - Confirm Signup (OTP) email template
+  Where to paste this:
+  Supabase Dashboard -> Authentication -> Emails -> Confirm signup
+  1. Make sure "Confirm signup" template is used, and your project's
+     Auth settings have OTP verification enabled (see notes below).
+  2. Paste the HTML below into the "Message body" field.
+  3. Keep the subject something like: "Your ArchFinish verification code"
+  4. This template uses {{ .Token }} which Supabase fills in with the 6-digit OTP.
+
+  Notes on enabling OTP instead of a magic link:
+  - Supabase Auth -> Providers -> Email: keep "Confirm email" ON.
+  - There is no separate global toggle for "link vs code" - what determines
+    OTP vs link is which variable your template renders and how your app
+    calls the API. Your template must use {{ .Token }} (the 6-digit code),
+    NOT {{ .ConfirmationURL }} (the magic link). Since the code now calls
+    supabase.auth.verifyOtp({ type: "signup", token, email }), the OTP flow
+    is already wired up on the frontend (src/contexts/AuthContext.tsx).
+  - Token expiry is controlled by Auth -> Settings -> Email OTP Expiration.
+-->
+<div style="background-color:#0f172a;padding:40px 20px;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:0 auto;background-color:#ffffff;border-radius:16px;overflow:hidden;">
+    <tr>
+      <td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:32px 40px;text-align:center;">
+        <div style="display:inline-block;width:56px;height:56px;background-color:rgba(255,255,255,0.15);border-radius:14px;line-height:56px;text-align:center;margin-bottom:12px;">
+          <span style="font-size:28px;">🏗️</span>
+        </div>
+        <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-0.02em;">ArchFinish</h1>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:40px 40px 24px 40px;text-align:center;">
+        <h2 style="margin:0 0 8px 0;color:#0f172a;font-size:20px;font-weight:700;">Verify your email</h2>
+        <p style="margin:0;color:#64748b;font-size:15px;line-height:1.6;">
+          Enter this code to confirm your email and activate your ArchFinish account.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:0 40px 24px 40px;text-align:center;">
+        <div style="display:inline-block;background-color:#f1f5f9;border:1px dashed #cbd5e1;border-radius:12px;padding:18px 28px;">
+          <span style="font-size:32px;font-weight:700;letter-spacing:8px;color:#4f46e5;font-family:'Courier New',monospace;">
+            {{ .Token }}
+          </span>
+        </div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:0 40px 32px 40px;text-align:center;">
+        <p style="margin:0;color:#94a3b8;font-size:13px;line-height:1.6;">
+          This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px 40px;background-color:#f8fafc;border-top:1px solid #e2e8f0;text-align:center;">
+        <p style="margin:0;color:#94a3b8;font-size:12px;">
+          &copy; ArchFinish &middot; AI-powered architectural drawing analysis
+        </p>
+      </td>
+    </tr>
+  </table>
+</div>

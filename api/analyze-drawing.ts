@@ -254,7 +254,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           responseSchema: RESPONSE_SCHEMA,
         },
       },
-      GEMINI_API_KEY
+      GEMINI_API_KEY,
+      // Function-level maxDuration is 60s (vercel.json). This budget leaves
+      // headroom for the Supabase auth check, JSON parsing and response
+      // write, so the function itself never gets killed mid-request.
+      { totalBudgetMs: 50000, perCallTimeoutMs: 45000 }
     );
 
     if (!response.ok) {

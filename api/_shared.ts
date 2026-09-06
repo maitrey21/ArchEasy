@@ -80,66 +80,127 @@ export async function requireUser(req: ApiRequest, res: ApiResponse): Promise<st
   return data.user.id;
 }
 
+export interface CallGeminiOptions {
+  /** Attempts per model before moving to the next one in GEMINI_MODELS. */
+  attemptsPerModel?: number;
+  /** Hard ceiling per individual fetch call, in ms. */
+  perCallTimeoutMs?: number;
+  /**
+   * Total wall-clock budget for the whole retry/fallback chain, in ms. Must
+   * stay comfortably under the function's `maxDuration` in vercel.json (60s) —
+   * otherwise Vercel kills the function itself and returns its own HTML/text
+   * crash page instead of JSON, which is unrecoverable on the client side.
+   */
+  totalBudgetMs?: number;
+}
+
 /**
  * Calls Gemini with the given payload, absorbing the transient failures Google
- * returns under load.
+ * returns under load, while staying inside a hard total time budget.
  *
- * Strategy: retry each model a couple of times with backoff for 503/429, then
- * fall through to the next model in GEMINI_MODELS. A 404 means the model was
- * retired, so we move to the next one immediately. Any other error is a real
- * failure and returns straight away.
+ * Strategy: try each model in GEMINI_MODELS in order. A fast 503/429 failure
+ * costs almost nothing, so most of the budget rolls over to whichever model
+ * ends up actually generating — each attempt gets whatever time remains,
+ * capped by perCallTimeoutMs. A 404 means the model was retired, so we move
+ * on immediately. Any other HTTP error is a real failure and returns straight
+ * away. If the budget runs out before any model succeeds (including a call
+ * that hangs and gets aborted), a synthetic 504 Response is returned instead
+ * of letting the caller — or Vercel itself — time out.
  *
  * Returns the response plus the model that actually served it.
  */
 export async function callGemini(
   payload: unknown,
   apiKey: string,
-  attemptsPerModel = 2
+  options: CallGeminiOptions = {}
 ): Promise<{ response: Response; model: string }> {
+  const attemptsPerModel = options.attemptsPerModel ?? 1;
+  const perCallTimeoutMs = options.perCallTimeoutMs ?? 45000;
+  const totalBudgetMs = options.totalBudgetMs ?? 48000;
+  const deadline = Date.now() + totalBudgetMs;
+
   let lastResponse: Response | null = null;
   let lastModel = GEMINI_MODELS[0];
+  let sawTimeout = false;
 
-  for (const model of GEMINI_MODELS) {
+  outer: for (const model of GEMINI_MODELS) {
     for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-      const response = await fetch(GEMINI_ENDPOINT(model, apiKey), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      const remaining = deadline - Date.now();
+      // Leave enough headroom to finalise and respond — don't start an
+      // attempt that has no realistic chance of finishing in time.
+      if (remaining < 4000) break outer;
 
-      if (response.ok) return { response, model };
-
-      lastResponse = response;
       lastModel = model;
+      const timeoutMs = Math.max(1000, Math.min(perCallTimeoutMs, remaining - 2000));
 
-      // Model gone: don't waste another attempt on it.
-      if (response.status === 404) {
-        console.warn(`Gemini model ${model} returned 404; trying next model`);
-        break;
-      }
+      try {
+        const response = await fetch(GEMINI_ENDPOINT(model, apiKey), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
 
-      const overloaded = response.status === 503 || response.status === 429;
-      if (!overloaded) return { response, model };
+        if (response.ok) return { response, model };
 
-      if (attempt < attemptsPerModel) {
-        const waitMs = 1200 * attempt;
+        lastResponse = response;
+
+        // Model gone: don't waste another attempt on it.
+        if (response.status === 404) {
+          console.warn(`Gemini model ${model} returned 404; trying next model`);
+          break;
+        }
+
+        const overloaded = response.status === 503 || response.status === 429;
+        if (!overloaded) return { response, model };
+
         console.warn(
-          `Gemini ${response.status} on ${model} (attempt ${attempt}/${attemptsPerModel}); retrying in ${waitMs}ms`
+          `Gemini ${response.status} on ${model} (attempt ${attempt}/${attemptsPerModel}); trying next`
         );
-        await new Promise((r) => setTimeout(r, waitMs));
-      } else {
-        console.warn(`Gemini ${response.status} on ${model} exhausted; trying next model`);
+      } catch (err) {
+        const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        sawTimeout ||= timedOut;
+        lastResponse = null;
+        console.error(
+          `Gemini call to ${model} failed:`,
+          timedOut ? `aborted after ${timeoutMs}ms` : err
+        );
       }
     }
   }
 
-  return { response: lastResponse!, model: lastModel };
+  if (lastResponse) return { response: lastResponse, model: lastModel };
+
+  // Every model failed with no usable HTTP response (pure timeouts/network
+  // errors). Return a real Response so callers get clean JSON instead of the
+  // request hanging until Vercel's own maxDuration kill kicks in.
+  const message = sawTimeout
+    ? "The AI took too long to respond. Please try again — a smaller or clearer image can help."
+    : "The AI service is temporarily unavailable. Please try again in a moment.";
+
+  return {
+    response: new Response(JSON.stringify({ error: message }), {
+      status: 504,
+      headers: { "Content-Type": "application/json" },
+    }),
+    model: lastModel,
+  };
 }
 
 /** Maps a Gemini HTTP failure onto a client-friendly response. */
 export function respondGeminiError(res: ApiResponse, status: number, errorText: string) {
   console.error("Gemini API error:", status, errorText);
 
+  if (status === 504) {
+    // Synthetic timeout from callGemini's own budget — errorText is already
+    // valid JSON with a user-friendly message, so pass it straight through.
+    try {
+      const parsed = JSON.parse(errorText);
+      return res.status(504).json(parsed);
+    } catch {
+      return res.status(504).json({ error: "The AI took too long to respond. Please try again." });
+    }
+  }
   if (status === 503) {
     return res.status(503).json({
       error: "Gemini is temporarily overloaded. Please try again in a moment.",

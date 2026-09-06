@@ -18,7 +18,7 @@ import {
   type ApiRequest,
   type ApiResponse,
   type GeminiResult,
-} from "./_shared";
+} from "./_shared.js";
 
 /** Room fields this endpoint reasons about. */
 interface RoomInput {
@@ -211,10 +211,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           responseSchema: RESPONSE_SCHEMA,
         },
       },
-      GEMINI_API_KEY,
-      // Text-only + lighter reasoning than detection, so allow a couple of
-      // attempts per model while still staying inside the 60s maxDuration.
-      { attemptsPerModel: 2, totalBudgetMs: 48000, perCallTimeoutMs: 20000 }
+      GEMINI_API_KEY
     );
 
     if (!response.ok) {

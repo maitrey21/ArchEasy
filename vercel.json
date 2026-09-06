@@ -4,5 +4,13 @@
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
-  ]
+  ],
+  "functions": {
+    "api/analyze-drawing.ts": {
+      "maxDuration": 60
+    },
+    "api/recommend-materials.ts": {
+      "maxDuration": 60
+    }
+  }
 }

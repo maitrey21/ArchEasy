@@ -6,7 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { Upload, Loader2, Layers } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { errorMessage, type AnalyzeDrawingResponse } from "@/lib/types";
+import { errorMessage, readJsonResponse, type AnalyzeDrawingResponse } from "@/lib/types";
 
 interface Props {
   projectId: string;
@@ -27,6 +27,17 @@ export default function DrawingUploader({ projectId, floorId, floorName }: Props
     mutationFn: async (file: File) => {
       if (!floorId) {
         throw new Error("Select or create a floor before uploading a drawing.");
+      }
+
+      // Vercel serverless functions hard-cap the request body at 4.5MB, and the
+      // file gets base64-encoded (~33% larger) before it's sent. Catch this
+      // client-side with a clear message instead of letting the platform's
+      // opaque 413 response reach the JSON parser.
+      const MAX_ANALYZE_FILE_BYTES = 3 * 1024 * 1024; // 3MB raw -> ~4MB base64
+      if (file.size > MAX_ANALYZE_FILE_BYTES) {
+        throw new Error(
+          `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)}MB, which is too large for AI analysis (max 3MB). Try compressing the image or exporting a lower-resolution version.`
+        );
       }
 
       setUploading(true);
@@ -82,7 +93,7 @@ export default function DrawingUploader({ projectId, floorId, floorName }: Props
           }),
         });
 
-        const analysisData: AnalyzeDrawingResponse = await res.json();
+        const analysisData = await readJsonResponse<AnalyzeDrawingResponse>(res);
         if (!res.ok) throw new Error(analysisData?.error || `Analysis failed (${res.status})`);
 
         setProgress("Saving rooms...");

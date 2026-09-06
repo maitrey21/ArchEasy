@@ -151,3 +151,30 @@ export function parseAnalysisMeta(value: unknown): AnalysisMeta | null {
     finish_reason: typeof v.finish_reason === "string" ? v.finish_reason : null,
   };
 }
+
+/**
+ * Reads a fetch Response as JSON, but tolerates non-JSON bodies.
+ *
+ * A crashed or timed-out Vercel serverless function returns Vercel's own
+ * HTML/text error page ("A server error has occurred...") instead of our
+ * JSON shape. Calling `res.json()` directly on that throws a confusing
+ * "Unexpected token 'A' ... is not valid JSON" error. This reads the body as
+ * text first and surfaces a readable message when it isn't JSON.
+ */
+export async function readJsonResponse<T extends { error?: string }>(
+  res: Response
+): Promise<T> {
+  const raw = await res.text();
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const isPlatformCrash =
+      /A server error has occurred|FUNCTION_INVOCATION|An error occurred with your deployment/i.test(
+        raw
+      );
+    const message = isPlatformCrash
+      ? "The server took too long or crashed while processing this request. Try a smaller file, or try again in a moment."
+      : `Unexpected response from server (status ${res.status}).`;
+    return { error: message } as T;
+  }
+}

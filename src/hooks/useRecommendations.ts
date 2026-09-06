@@ -12,13 +12,36 @@ import { useToast } from "@/hooks/use-toast";
 import {
   ELEMENT_TO_ROOM_COLUMN,
   errorMessage,
+  readJsonResponse,
   type RecommendationElement,
   type Room,
   type RoomRecommendation,
 } from "@/lib/types";
-import type { TablesInsert } from "@/integrations/supabase/types";
+import type { Json, TablesInsert } from "@/integrations/supabase/types";
 
 type RecommendationInsert = TablesInsert<"room_recommendations">;
+
+/** Shape of one recommendation item returned by /api/recommend-materials. */
+interface RecommendationItem {
+  room_index: number;
+  element: string;
+  detected_finish?: string;
+  recommended_finish?: string;
+  rationale?: string;
+  durability?: string;
+  maintenance?: string;
+  moisture_resistance?: string;
+  slip_resistance?: string;
+  cost_band?: string;
+  alternatives?: Json;
+}
+
+interface RecommendMaterialsResponse {
+  error?: string;
+  incomplete?: boolean;
+  model?: string;
+  recommendations?: RecommendationItem[];
+}
 
 /** Keep batches under the server's 40-room cap. */
 const BATCH_SIZE = 20;
@@ -86,7 +109,7 @@ export function useRecommendations(projectId: string | undefined, floorId: strin
           body: JSON.stringify({ rooms: batch, projectName, floorName }),
         });
 
-        const payload = await res.json();
+        const payload = await readJsonResponse<RecommendMaterialsResponse>(res);
         if (!res.ok) throw new Error(payload?.error || `Recommendation failed (${res.status})`);
 
         if (payload.incomplete) incompleteBatches++;

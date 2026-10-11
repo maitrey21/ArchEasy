@@ -7,6 +7,11 @@ import { useToast } from "@/hooks/use-toast";
 import { Upload, Loader2, Layers } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { errorMessage, readJsonResponse, type AnalyzeDrawingResponse } from "@/lib/types";
+import {
+  prepareDrawingForAnalysis,
+  dataUrlBytes,
+  MAX_PAYLOAD_BYTES,
+} from "@/lib/prepareDrawing";
 
 interface Props {
   projectId: string;
@@ -29,14 +34,12 @@ export default function DrawingUploader({ projectId, floorId, floorName }: Props
         throw new Error("Select or create a floor before uploading a drawing.");
       }
 
-      // Vercel serverless functions hard-cap the request body at 4.5MB, and the
-      // file gets base64-encoded (~33% larger) before it's sent. Catch this
-      // client-side with a clear message instead of letting the platform's
-      // opaque 413 response reach the JSON parser.
-      const MAX_ANALYZE_FILE_BYTES = 3 * 1024 * 1024; // 3MB raw -> ~4MB base64
-      if (file.size > MAX_ANALYZE_FILE_BYTES) {
+      // Guard against genuinely unusable uploads only. Anything smaller is
+      // rasterised/downscaled below, so large sheets no longer get rejected.
+      const MAX_SOURCE_BYTES = 50 * 1024 * 1024;
+      if (file.size > MAX_SOURCE_BYTES) {
         throw new Error(
-          `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)}MB, which is too large for AI analysis (max 3MB). Try compressing the image or exporting a lower-resolution version.`
+          `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)}MB. Please export a smaller version (under 50MB).`
         );
       }
 
@@ -67,9 +70,23 @@ export default function DrawingUploader({ projectId, floorId, floorName }: Props
         .single();
       if (insertError) throw insertError;
 
-      // Convert file to base64 for AI analysis
+      // Normalise the drawing before analysis: PDFs become a single rasterised
+      // page and oversized images are downscaled. Sending a vector PDF or a
+      // full-resolution sheet made Gemini slow enough to exceed the serverless
+      // function's time limit, which surfaced as an opaque "server took too
+      // long" error. The original file stays untouched in storage.
+      setProgress("Preparing drawing...");
+      const prepared = await prepareDrawingForAnalysis(file);
+      if (prepared.note) console.log("Analysis payload:", prepared.note);
+
+      if (dataUrlBytes(prepared.dataUrl) > MAX_PAYLOAD_BYTES) {
+        throw new Error(
+          "This drawing is too detailed to analyse in one request. Try exporting it at a lower resolution, or split it per zone."
+        );
+      }
+
       setProgress("Detecting rooms with AI...");
-      const base64 = await fileToBase64(file);
+      const base64 = prepared.dataUrl;
 
       try {
         // The Gemini key lives only on the server (/api/analyze-drawing), so it
@@ -79,22 +96,52 @@ export default function DrawingUploader({ projectId, floorId, floorName }: Props
         const accessToken = sessionData.session?.access_token;
         if (!accessToken) throw new Error("Your session expired. Please sign in again.");
 
-        const res = await fetch("/api/analyze-drawing", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify({
-            imageBase64: base64,
-            fileName: file.name,
-            mimeType: file.type,
-            floorName,
-          }),
+        const requestBody = JSON.stringify({
+          imageBase64: base64,
+          fileName: file.name,
+          mimeType: prepared.mimeType,
+          floorName,
         });
 
-        const analysisData = await readJsonResponse<AnalyzeDrawingResponse>(res);
-        if (!res.ok) throw new Error(analysisData?.error || `Analysis failed (${res.status})`);
+        // Gemini returns 503 ("overloaded") in bursts, and each attempt on the
+        // server costs 10-20s. Rather than let one unlucky minute fail the
+        // upload, retry here: every attempt gets a fresh function time budget,
+        // and upstream load varies from one moment to the next.
+        const TRANSIENT = new Set([429, 500, 502, 503, 504]);
+        const MAX_ATTEMPTS = 3;
+        let analysisData!: AnalyzeDrawingResponse;
+
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          setProgress(
+            attempt === 1
+              ? "Detecting rooms with AI..."
+              : `Detecting rooms with AI... (attempt ${attempt} of ${MAX_ATTEMPTS})`
+          );
+
+          const res = await fetch("/api/analyze-drawing", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: requestBody,
+          });
+
+          analysisData = await readJsonResponse<AnalyzeDrawingResponse>(res);
+          if (res.ok) break;
+
+          const retryable = TRANSIENT.has(res.status) && attempt < MAX_ATTEMPTS;
+          if (!retryable) {
+            throw new Error(analysisData?.error || `Analysis failed (${res.status})`);
+          }
+
+          const waitMs = 2000 * attempt;
+          console.warn(
+            `Analysis attempt ${attempt} failed with ${res.status}; retrying in ${waitMs}ms`
+          );
+          setProgress(`AI is busy — retrying in ${Math.round(waitMs / 1000)}s...`);
+          await new Promise((r) => setTimeout(r, waitMs));
+        }
 
         setProgress("Saving rooms...");
         const rooms = Array.isArray(analysisData.rooms) ? analysisData.rooms : [];
@@ -297,11 +344,4 @@ export default function DrawingUploader({ projectId, floorId, floorName }: Props
   );
 }
 
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-  });
-}
+

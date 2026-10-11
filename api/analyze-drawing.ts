@@ -230,7 +230,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       "Include a bbox for every room. Leave flooring_size and ceiling_size empty. Every room needs a remark explaining the material choice.",
     ].join("\n");
 
-    const { response, model } = await callGemini(
+    const { response, model, elapsedMs } = await callGemini(
       {
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents: [
@@ -254,7 +254,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           responseSchema: RESPONSE_SCHEMA,
         },
       },
-      GEMINI_API_KEY
+      GEMINI_API_KEY,
+      // Detection is the slowest call in the app: a dense sheet can take
+      // 20-40s on its own. Cap a single attempt so one overloaded model can't
+      // consume the whole budget, leaving room to fail over to another model.
+      { perCallTimeoutMs: 24000 }
     );
 
     if (!response.ok) {
@@ -264,7 +268,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const aiResult = (await response.json()) as GeminiResult;
     const content = extractText(aiResult);
     const finishReason = aiResult?.candidates?.[0]?.finishReason;
-    console.log("AI response length:", content.length, "model:", model, "finishReason:", finishReason);
+    console.log(
+      "AI response length:", content.length, "model:", model,
+      "finishReason:", finishReason, "geminiMs:", elapsedMs
+    );
 
     let parsed: Record<string, unknown>;
     try {

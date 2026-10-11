@@ -198,7 +198,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
 
     console.log("Recommending materials for", rooms.length, "rooms; floor:", floorName, "user:", userId);
 
-    const { response, model } = await callGemini(
+    const { response, model, elapsedMs } = await callGemini(
       {
         systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
         contents: [{ role: "user", parts: [{ text: userText }] }],
@@ -211,7 +211,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
           responseSchema: RESPONSE_SCHEMA,
         },
       },
-      GEMINI_API_KEY
+      GEMINI_API_KEY,
+      // Text-only and lighter reasoning than detection, so individual calls
+      // are quick; cap them tightly to leave room for model fail-over.
+      { perCallTimeoutMs: 20000 }
     );
 
     if (!response.ok) {
@@ -222,7 +225,8 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     const content = extractText(aiResult);
     const finishReason = aiResult?.candidates?.[0]?.finishReason;
     console.log(
-      "Recommendation response length:", content.length, "model:", model, "finishReason:", finishReason
+      "Recommendation response length:", content.length, "model:", model,
+      "finishReason:", finishReason, "geminiMs:", elapsedMs
     );
 
     let parsed: Record<string, unknown>;

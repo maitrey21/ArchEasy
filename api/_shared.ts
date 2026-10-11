@@ -81,65 +81,193 @@ export async function requireUser(req: ApiRequest, res: ApiResponse): Promise<st
 }
 
 /**
- * Calls Gemini with the given payload, absorbing the transient failures Google
- * returns under load.
+ * Wall-clock ceiling for these functions, in seconds.
  *
- * Strategy: retry each model a couple of times with backoff for 503/429, then
- * fall through to the next model in GEMINI_MODELS. A 404 means the model was
- * retired, so we move to the next one immediately. Any other error is a real
- * failure and returns straight away.
+ * MUST stay in sync with `functions[].maxDuration` in vercel.json. If Vercel
+ * kills the function first, the platform returns its own HTML/text crash page
+ * (FUNCTION_INVOCATION_TIMEOUT) instead of JSON, which the browser cannot
+ * interpret — the user just sees "the server took too long or crashed".
+ * Everything below is sized so we always answer before that happens.
+ *
+ * Defaults to 60 to match vercel.json, which every Vercel plan accepts. If you
+ * raise maxDuration there (300s is the Hobby maximum once Fluid compute is on,
+ * 800s on Pro), set FUNCTION_MAX_DURATION_S to the same value so this budget
+ * actually uses the extra room. Keeping the default low is deliberate: a budget
+ * larger than the real platform cap would reintroduce the crash page.
+ */
+export const FUNCTION_MAX_DURATION_S = Number(process.env.FUNCTION_MAX_DURATION_S) || 60;
+
+/** Time reserved for auth, JSON parsing and writing the response. */
+const RESPONSE_RESERVE_MS = 8000;
+
+export interface CallGeminiOptions {
+  /**
+   * How many times to sweep the whole model list. Pass 1 tries each model
+   * once; later passes retry models that were merely busy.
+   */
+  passes?: number;
+  /** Hard ceiling for any single HTTP call, in ms. */
+  perCallTimeoutMs?: number;
+  /** Total wall-clock budget for the whole chain, in ms. */
+  totalBudgetMs?: number;
+}
+
+/** True when the failure is transient and another model may well succeed. */
+const isTransient = (status: number) => status === 503 || status === 429 || status >= 500;
+
+/**
+ * Abort signal that fires after `ms`.
+ *
+ * `AbortSignal.timeout` exists on every runtime we deploy to, but falling back
+ * to a manual controller keeps the helper usable anywhere — a missing static
+ * would otherwise throw on *every* attempt and fail the whole request.
+ */
+function timeoutSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("TimeoutError")), ms);
+  // Don't hold the process open just for the timer.
+  (timer as unknown as { unref?: () => void })?.unref?.();
+  return controller.signal;
+}
+
+/**
+ * Calls Gemini, absorbing the transient failures Google returns under load,
+ * while guaranteeing a response inside the function's time budget.
+ *
+ * Strategy — breadth first, not depth first. A 503 means *that* model is
+ * overloaded right now, so the cheapest useful next move is a DIFFERENT model,
+ * not the same one again. Each pass therefore tries every model once before
+ * any model is retried. This matters because an overloaded Gemini takes
+ * 10-20 seconds to answer 503: spending two of those on one model (the old
+ * behaviour) burned the entire 60s budget before the healthy third model was
+ * ever reached, and Vercel killed the function mid-flight.
+ *
+ * Also enforced here:
+ *  - every call gets AbortSignal.timeout, so one hung request cannot eat the budget
+ *  - no attempt starts unless it can plausibly finish before the deadline
+ *  - if the budget runs out, a synthetic 504 *JSON* Response is returned, so
+ *    the client always gets a readable error instead of a platform crash page
  *
  * Returns the response plus the model that actually served it.
  */
 export async function callGemini(
   payload: unknown,
   apiKey: string,
-  attemptsPerModel = 2
-): Promise<{ response: Response; model: string }> {
+  options: CallGeminiOptions = {}
+): Promise<{ response: Response; model: string; elapsedMs: number }> {
+  const started = Date.now();
+  const passes = options.passes ?? 2;
+  const totalBudgetMs =
+    options.totalBudgetMs ?? FUNCTION_MAX_DURATION_S * 1000 - RESPONSE_RESERVE_MS;
+  const perCallTimeoutMs = options.perCallTimeoutMs ?? totalBudgetMs;
+  const deadline = started + totalBudgetMs;
+
+  const body = JSON.stringify(payload);
   let lastResponse: Response | null = null;
   let lastModel = GEMINI_MODELS[0];
+  let sawTimeout = false;
+  /** Models that returned 404/400-class errors: never worth another attempt. */
+  const dead = new Set<string>();
 
-  for (const model of GEMINI_MODELS) {
-    for (let attempt = 1; attempt <= attemptsPerModel; attempt++) {
-      const response = await fetch(GEMINI_ENDPOINT(model, apiKey), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+  for (let pass = 1; pass <= passes; pass++) {
+    for (const model of GEMINI_MODELS) {
+      if (dead.has(model)) continue;
 
-      if (response.ok) return { response, model };
-
-      lastResponse = response;
-      lastModel = model;
-
-      // Model gone: don't waste another attempt on it.
-      if (response.status === 404) {
-        console.warn(`Gemini model ${model} returned 404; trying next model`);
+      const remaining = deadline - Date.now();
+      // Don't start something that cannot realistically finish in time.
+      if (remaining < 5000) {
+        console.warn(
+          `Gemini budget nearly spent (${remaining}ms left); stopping before ${model} (pass ${pass})`
+        );
+        pass = passes;
         break;
       }
 
-      const overloaded = response.status === 503 || response.status === 429;
-      if (!overloaded) return { response, model };
+      lastModel = model;
+      const timeoutMs = Math.max(4000, Math.min(perCallTimeoutMs, remaining - 1500));
 
-      if (attempt < attemptsPerModel) {
-        const waitMs = 1200 * attempt;
+      try {
+        const response = await fetch(GEMINI_ENDPOINT(model, apiKey), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          signal: timeoutSignal(timeoutMs),
+        });
+
+        if (response.ok) {
+          console.log(`Gemini OK on ${model} (pass ${pass}) after ${Date.now() - started}ms`);
+          return { response, model, elapsedMs: Date.now() - started };
+        }
+
+        lastResponse = response;
+
+        // Retired or rejected model: stop considering it entirely.
+        if (response.status === 404 || response.status === 400) {
+          console.warn(`Gemini ${response.status} on ${model}; dropping this model`);
+          dead.add(model);
+          continue;
+        }
+
+        // A real, non-transient failure (auth, quota-with-billing, etc.).
+        if (!isTransient(response.status)) {
+          return { response, model, elapsedMs: Date.now() - started };
+        }
+
         console.warn(
-          `Gemini ${response.status} on ${model} (attempt ${attempt}/${attemptsPerModel}); retrying in ${waitMs}ms`
+          `Gemini ${response.status} on ${model} (pass ${pass}) after ${Date.now() - started}ms; trying next model`
         );
-        await new Promise((r) => setTimeout(r, waitMs));
-      } else {
-        console.warn(`Gemini ${response.status} on ${model} exhausted; trying next model`);
+      } catch (err) {
+        const timedOut =
+          err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        sawTimeout ||= timedOut;
+        console.error(
+          `Gemini call to ${model} failed (pass ${pass}):`,
+          timedOut ? `aborted after ${timeoutMs}ms` : err
+        );
       }
     }
   }
 
-  return { response: lastResponse!, model: lastModel };
+  const elapsedMs = Date.now() - started;
+
+  // Prefer a genuine upstream response so the caller can map the real status.
+  if (lastResponse) return { response: lastResponse, model: lastModel, elapsedMs };
+
+  // Nothing but timeouts/network errors. Return real JSON rather than letting
+  // the request hang until the platform kills it.
+  console.error(`Gemini unreachable after ${elapsedMs}ms (timeout seen: ${sawTimeout})`);
+  const message = sawTimeout
+    ? "The AI took too long to respond. Please try again — a smaller or clearer drawing helps."
+    : "The AI service is temporarily unavailable. Please try again in a moment.";
+
+  return {
+    response: new Response(JSON.stringify({ error: message }), {
+      status: 504,
+      headers: { "Content-Type": "application/json" },
+    }),
+    model: lastModel,
+    elapsedMs,
+  };
 }
 
 /** Maps a Gemini HTTP failure onto a client-friendly response. */
 export function respondGeminiError(res: ApiResponse, status: number, errorText: string) {
   console.error("Gemini API error:", status, errorText);
 
+  if (status === 504) {
+    // Synthetic timeout from callGemini's own budget: errorText is already
+    // valid JSON carrying a user-facing message, so pass it straight through.
+    try {
+      return res.status(504).json(JSON.parse(errorText));
+    } catch {
+      return res.status(504).json({
+        error: "The AI took too long to respond. Please try again.",
+      });
+    }
+  }
   if (status === 503) {
     return res.status(503).json({
       error: "Gemini is temporarily overloaded. Please try again in a moment.",

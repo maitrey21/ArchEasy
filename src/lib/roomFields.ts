@@ -81,6 +81,26 @@ export function groupHasData(room: Room, group: FieldGroup): boolean {
   return group.fields.some((f) => fieldValue(room, f.key) !== EMPTY_VALUE);
 }
 
+/** Room types the analysis API can emit (api/analyze-drawing.ts); reused for manual rooms. */
+export const ROOM_TYPES = [
+  "general",
+  "office",
+  "bedroom",
+  "bathroom",
+  "kitchen",
+  "living",
+  "dining",
+  "lobby",
+  "hallway",
+  "staircase",
+  "utility",
+  "service",
+  "storage",
+  "balcony",
+  "parking",
+  "garage",
+] as const;
+
 /** Human label for a room type tag. */
 export function roomTypeLabel(roomType: string | null): string {
   if (!roomType) return "Space";

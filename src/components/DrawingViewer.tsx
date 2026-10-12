@@ -13,19 +13,33 @@ import {
   ChevronRight,
   Expand,
   Shrink,
+  PencilRuler,
+  SquarePlus,
+  Lasso,
+  Undo2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
 import PdfCanvas, { type RenderedPageSize } from "@/components/PdfCanvas";
-import { parseBBox, type Room, type Drawing } from "@/lib/types";
+import RoomOverlayBox from "@/components/RoomOverlayBox";
+import BoxDrawLayer from "@/components/BoxDrawLayer";
+import FreeformDrawLayer from "@/components/FreeformDrawLayer";
+import NewRoomPanel from "@/components/NewRoomPanel";
+import { useRoomEdits } from "@/hooks/useRoomEdits";
+import { centredBox, labelSuggestions, boxesEqual } from "@/lib/bboxEdit";
+import { parseAnalysisMeta, parseBBox, type BBox, type Room, type Drawing } from "@/lib/types";
+import { useToast } from "@/hooks/use-toast";
+import ShapeEditPrompt from "@/components/ShapeEditPrompt";
 
 interface Props {
   drawing: Drawing | null;
   rooms: Room[];
   highlightedRoomId: string | null;
   onHighlightRoom: (id: string | null) => void;
+  /** Active floor name, stored on rooms the user adds by hand. */
+  floorName?: string;
 }
 
 const MIN_ZOOM = 0.25;
@@ -69,12 +83,40 @@ export default function DrawingViewer({
   rooms,
   highlightedRoomId,
   onHighlightRoom,
+  floorName,
 }: Props) {
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [showAnnotations, setShowAnnotations] = useState(true);
   const [showLabels, setShowLabels] = useState(true);
   const [isPanning, setIsPanning] = useState(false);
+
+  // Box editing: move / resize / rename overlays directly on the drawing.
+  const [editMode, setEditMode] = useState(false);
+  const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
+  // Adding rooms: drawMode = next drag draws a box; freeformMode = lasso draw.
+  // pendingBox = drawn box awaiting a name.
+  const [drawMode, setDrawMode] = useState(false);
+  const [freeformMode, setFreeformMode] = useState(false);
+  const [pendingBox, setPendingBox] = useState<BBox | null>(null);
+  const [pendingShapeEdit, setPendingShapeEdit] = useState<{
+    roomId: string;
+    roomName: string;
+    originalBox: BBox;
+    newBox: BBox;
+  } | null>(null);
+  const [boxHistory, setBoxHistory] = useState<{
+    roomId: string;
+    roomName: string;
+    boxBefore: BBox;
+    boxAfter: BBox;
+  }[]>([]);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const { toast } = useToast();
+  const { updateBox, renameRoom, createRoom, isSaving, isCreating } = useRoomEdits(
+    drawing?.project_id
+  );
 
   // PDF-specific: current page + the last rendered page's size / count.
   const [pdfPage, setPdfPage] = useState(1);
@@ -106,9 +148,28 @@ export default function DrawingViewer({
   const roomsWithBoxes = useMemo(
     () =>
       rooms
-        .map((room) => ({ room, box: parseBBox(room.bbox) }))
+        .map((room) => {
+          const isPending = pendingShapeEdit && pendingShapeEdit.roomId === room.id;
+          const box = isPending ? pendingShapeEdit.newBox : parseBBox(room.bbox);
+          return { room, box };
+        })
         .filter((r): r is { room: Room; box: [number, number, number, number] } => r.box !== null),
-    [rooms]
+    [rooms, pendingShapeEdit]
+  );
+
+  const selectedRoom = useMemo(
+    () => rooms.find((r) => r.id === selectedRoomId) ?? null,
+    [rooms, selectedRoomId]
+  );
+
+  const selectedRoomBox = useMemo(
+    () => roomsWithBoxes.find((r) => r.room.id === selectedRoomId)?.box ?? null,
+    [roomsWithBoxes, selectedRoomId]
+  );
+
+  const placedRooms = useMemo(
+    () => roomsWithBoxes.map((r) => r.room),
+    [roomsWithBoxes]
   );
 
   const resetView = useCallback(() => {
@@ -121,6 +182,13 @@ export default function DrawingViewer({
     resetView();
     setPdfPage(1);
     setPdfInfo(null);
+    setEditMode(false);
+    setSelectedRoomId(null);
+    setDrawMode(false);
+    setFreeformMode(false);
+    setPendingBox(null);
+    setPendingShapeEdit(null);
+    setBoxHistory([]);
   }, [drawing?.id, resetView]);
 
   // Track the canvas container width so PDFs render fit-to-width.
@@ -144,6 +212,8 @@ export default function DrawingViewer({
 
   const startPan = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // Boxes stop propagation in edit mode, so this is a press on empty canvas.
+    setSelectedRoomId(null);
     setIsPanning(true);
     panStart.current = { x: e.clientX, y: e.clientY, offsetX: offset.x, offsetY: offset.y };
   };
@@ -187,8 +257,205 @@ export default function DrawingViewer({
 
   // Overlays are anchored to the sheet the AI analysed. For PDFs we only trust
   // page 1 (a floor plan is virtually always a single sheet).
-  const overlaysVisible =
-    showAnnotations && (!isPdf || pdfPage === 1) && roomsWithBoxes.length > 0;
+  const onAnalysedSheet = showAnnotations && (!isPdf || pdfPage === 1);
+
+  // Editing needs the analysed sheet on screen, but not existing boxes: a drawing
+  // where the AI placed nothing can still have boxes added by hand.
+  const editing = editMode && onAnalysedSheet;
+  const drawingBox = editing && drawMode && !freeformMode && !pendingBox;
+  const drawingFreeform = editing && freeformMode && !pendingBox;
+
+  const getLayerRect = useCallback(
+    () => overlayRef.current?.getBoundingClientRect() ?? null,
+    []
+  );
+
+  const handleRoomClick = useCallback(
+    (id: string) => onHighlightRoom(highlightedRoomId === id ? null : id),
+    [highlightedRoomId, onHighlightRoom]
+  );
+
+  /** Rooms of this drawing with no box: a newly drawn box can be attached to one of them. */
+  const unplacedRooms = useMemo(() => rooms.filter((r) => parseBBox(r.bbox) === null), [rooms]);
+
+  /** Labels the AI read but could not place, offered as names for new boxes. */
+  const nameSuggestions = useMemo(() => {
+    const meta = parseAnalysisMeta(drawing?.analysis_meta);
+    const candidates = [...(meta?.undetected_spaces ?? []), ...(meta?.unmatched_labels ?? [])];
+    return labelSuggestions(
+      candidates,
+      rooms.map((r) => r.name)
+    );
+  }, [drawing?.analysis_meta, rooms]);
+
+  const handleBoxDrawn = useCallback((box: BBox) => {
+    setDrawMode(false);
+    setSelectedRoomId(null);
+    setPendingBox(box);
+  }, []);
+
+  const handleStartFreeform = useCallback((roomId: string) => {
+    setSelectedRoomId(roomId);
+    setDrawMode(false);
+    setFreeformMode(true);
+  }, []);
+
+  const handleFreeformDrawn = useCallback(
+    (box: BBox, targetRoomId?: string | null) => {
+      if (targetRoomId) {
+        const target = rooms.find((r) => r.id === targetRoomId);
+        const originalBox = parseBBox(target?.bbox);
+        if (originalBox) {
+          setPendingShapeEdit({
+            roomId: targetRoomId,
+            roomName: target?.name ?? "Room",
+            originalBox,
+            newBox: box,
+          });
+          setFreeformMode(false);
+          setSelectedRoomId(targetRoomId);
+        } else {
+          updateBox(targetRoomId, box);
+          setFreeformMode(false);
+          setSelectedRoomId(targetRoomId);
+        }
+      } else {
+        handleBoxDrawn(box);
+      }
+    },
+    [handleBoxDrawn, rooms, updateBox]
+  );
+
+  const handleSaveShapeEdit = useCallback(() => {
+    if (!pendingShapeEdit) return;
+    const { roomId, roomName, originalBox, newBox } = pendingShapeEdit;
+    setBoxHistory((prev) => [
+      ...prev,
+      { roomId, roomName, boxBefore: originalBox, boxAfter: newBox },
+    ]);
+    updateBox(roomId, newBox);
+    toast({
+      title: "Shape changes saved",
+      description: `Updated boundaries for ${roomName}.`,
+    });
+    setPendingShapeEdit(null);
+  }, [pendingShapeEdit, toast, updateBox]);
+
+  const handleUndoShapeEdit = useCallback(() => {
+    if (!pendingShapeEdit) return;
+    const { roomName } = pendingShapeEdit;
+    setPendingShapeEdit(null);
+    toast({
+      title: "Shape changes undone",
+      description: `Reverted ${roomName} to its original boundaries.`,
+    });
+  }, [pendingShapeEdit, toast]);
+
+  const handleUndoLastChange = useCallback(() => {
+    if (pendingShapeEdit) {
+      handleUndoShapeEdit();
+      return;
+    }
+    if (boxHistory.length === 0) return;
+    const last = boxHistory[boxHistory.length - 1];
+    setBoxHistory((prev) => prev.slice(0, -1));
+    updateBox(last.roomId, last.boxBefore);
+    setSelectedRoomId(last.roomId);
+    toast({
+      title: "Shape change undone",
+      description: `Reverted ${last.roomName} to previous shape.`,
+    });
+  }, [boxHistory, handleUndoShapeEdit, pendingShapeEdit, toast, updateBox]);
+
+  const handleCommitBox = useCallback(
+    (id: string, box: BBox, previousBox?: BBox) => {
+      if (previousBox && !boxesEqual(box, previousBox)) {
+        const room = rooms.find((r) => r.id === id);
+        setBoxHistory((prev) => [
+          ...prev,
+          {
+            roomId: id,
+            roomName: room?.name ?? "Room",
+            boxBefore: previousBox,
+            boxAfter: box,
+          },
+        ]);
+      }
+      updateBox(id, box);
+    },
+    [rooms, updateBox]
+  );
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) {
+        const tag = (document.activeElement?.tagName || "").toLowerCase();
+        if (tag === "input" || tag === "textarea") return;
+        e.preventDefault();
+        handleUndoLastChange();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleUndoLastChange]);
+
+  const cancelPendingBox = useCallback(() => {
+    setPendingBox(null);
+    addButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const handleCreateRoom = async ({ name, roomType }: { name: string; roomType: string }) => {
+    if (!drawing || !pendingBox) return;
+    try {
+      const room = await createRoom({
+        drawing,
+        name,
+        roomType,
+        bbox: pendingBox,
+        floorLevel: floorName ?? "",
+      });
+      setPendingBox(null);
+      // Select it for immediate adjusting and light up its card below.
+      setSelectedRoomId(room.id);
+      onHighlightRoom(room.id);
+    } catch {
+      // The hook already showed a toast; keep the panel open so the user can retry.
+    }
+  };
+
+  const handleAssignBox = (roomId: string) => {
+    if (!pendingBox) return;
+    const room = rooms.find((r) => r.id === roomId);
+    const originalBox = parseBBox(room?.bbox);
+    const boxToAssign = pendingBox;
+    setPendingBox(null);
+    if (originalBox) {
+      setPendingShapeEdit({
+        roomId,
+        roomName: room?.name ?? "Room",
+        originalBox,
+        newBox: boxToAssign,
+      });
+      setSelectedRoomId(roomId);
+    } else {
+      updateBox(roomId, boxToAssign);
+      setSelectedRoomId(roomId);
+      onHighlightRoom(roomId);
+    }
+  };
+
+  // Esc leaves draw/freeform mode (a box in progress is cancelled by the draw layer first).
+  useEffect(() => {
+    if (!drawingBox && !drawingFreeform) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setDrawMode(false);
+        setFreeformMode(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawingBox, drawingFreeform]);
 
   const pdfPageCount = pdfInfo?.pageCount ?? 1;
 
@@ -206,46 +473,94 @@ export default function DrawingViewer({
     );
   }
 
+  // Must stay shrink-wrapped to the media: its on-screen rect converts drag pixels to sheet units.
   const overlayLayer = (
-    <div className="pointer-events-none absolute inset-0">
-      {roomsWithBoxes.map(({ room, box }) => {
-        const [ymin, xmin, ymax, xmax] = box;
-        const color = roomTypeColor(room.room_type);
-        const isHot = highlightedRoomId === room.id;
-        return (
+    <div ref={overlayRef} className="pointer-events-none absolute inset-0">
+      {roomsWithBoxes.map(({ room, box }) => (
+        <RoomOverlayBox
+          key={room.id}
+          room={room}
+          box={box}
+          color={roomTypeColor(room.room_type)}
+          zoom={zoom}
+          isHot={highlightedRoomId === room.id}
+          isSelected={editing && selectedRoomId === room.id}
+          isFreeformTarget={drawingFreeform && selectedRoomId === room.id}
+          editMode={editing && !pendingShapeEdit}
+          showLabel={showLabels}
+          getLayerRect={getLayerRect}
+          onHover={onHighlightRoom}
+          onClickRoom={handleRoomClick}
+          onSelect={setSelectedRoomId}
+          onCommitBox={handleCommitBox}
+          onRename={renameRoom}
+          onStartFreeform={handleStartFreeform}
+        />
+      ))}
+
+      {drawingBox && (
+        <BoxDrawLayer zoom={zoom} getLayerRect={getLayerRect} onDrawn={handleBoxDrawn} />
+      )}
+
+      {drawingFreeform && (
+        <FreeformDrawLayer
+          zoom={zoom}
+          getLayerRect={getLayerRect}
+          targetRoom={selectedRoom}
+          targetBox={selectedRoomBox}
+          existingRooms={roomsWithBoxes}
+          onSelectRoom={setSelectedRoomId}
+          onDrawn={handleFreeformDrawn}
+        />
+      )}
+
+      {editing && pendingBox && (
+        <NewRoomPanel
+          box={pendingBox}
+          zoom={zoom}
+          suggestions={nameSuggestions}
+          unplacedRooms={unplacedRooms}
+          placedRooms={placedRooms}
+          saving={isCreating}
+          onCreate={handleCreateRoom}
+          onAssign={handleAssignBox}
+          onCancel={cancelPendingBox}
+        />
+      )}
+
+      {editing && pendingShapeEdit && (
+        <>
           <div
-            key={room.id}
-            className="pointer-events-auto absolute cursor-pointer transition-all"
+            aria-hidden="true"
+            className="pointer-events-none absolute"
             style={{
-              top: `${ymin / 10}%`,
-              left: `${xmin / 10}%`,
-              height: `${(ymax - ymin) / 10}%`,
-              width: `${(xmax - xmin) / 10}%`,
-              border: `${isHot ? 2.5 : 1.5}px solid ${color}`,
-              backgroundColor: isHot ? `${color}33` : `${color}14`,
-              boxShadow: isHot ? `0 0 0 3px ${color}33` : "none",
+              top: `${pendingShapeEdit.originalBox[0] / 10}%`,
+              left: `${pendingShapeEdit.originalBox[1] / 10}%`,
+              height: `${(pendingShapeEdit.originalBox[2] - pendingShapeEdit.originalBox[0]) / 10}%`,
+              width: `${(pendingShapeEdit.originalBox[3] - pendingShapeEdit.originalBox[1]) / 10}%`,
+              border: `${2 / zoom}px dashed hsl(var(--muted-foreground) / 0.6)`,
+              backgroundColor: "hsl(var(--muted-foreground) / 0.08)",
               borderRadius: 3,
-              zIndex: isHot ? 2 : 1,
+              zIndex: 14,
             }}
-            onMouseEnter={() => onHighlightRoom(room.id)}
-            onMouseLeave={() => onHighlightRoom(null)}
-            onClick={() => onHighlightRoom(isHot ? null : room.id)}
-            title={`${room.name}${room.space_tag ? ` (${room.space_tag})` : ""}`}
           >
-            {showLabels && (
-              <span
-                className="absolute left-0 top-0 max-w-full -translate-y-full truncate rounded-t px-1 font-semibold leading-tight text-white"
-                style={{
-                  backgroundColor: color,
-                  fontSize: `${Math.max(6, (9 / Math.max(zoom, 1)) * 1.1)}px`,
-                }}
-              >
-                {room.name}
-              </span>
-            )}
+            <span
+              className="absolute left-1 top-1 rounded bg-background/90 px-1 py-0.5 text-[9px] font-semibold text-muted-foreground shadow-sm"
+              style={{ transform: `scale(${Math.max(0.65, 1 / zoom)})`, transformOrigin: "top left" }}
+            >
+              Previous shape
+            </span>
           </div>
-        );
-      })}
+
+          <ShapeEditPrompt
+            roomName={pendingShapeEdit.roomName}
+            box={pendingShapeEdit.newBox}
+            zoom={zoom}
+            onSave={handleSaveShapeEdit}
+            onUndo={handleUndoShapeEdit}
+          />
+        </>
+      )}
     </div>
   );
 
@@ -332,6 +647,122 @@ export default function DrawingViewer({
             </TooltipTrigger>
             <TooltipContent>{showLabels ? "Hide" : "Show"} room labels</TooltipContent>
           </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon"
+                variant={editing ? "default" : "outline"}
+                className="h-7 w-7"
+                onClick={() => {
+                  setEditMode((v) => !v);
+                  setSelectedRoomId(null);
+                  setDrawMode(false);
+                  setFreeformMode(false);
+                  setPendingBox(null);
+                }}
+                disabled={!onAnalysedSheet || !signedUrl}
+                aria-label={editing ? "Finish editing room boxes" : "Edit room boxes"}
+                aria-pressed={editing}
+              >
+                <PencilRuler className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {editing ? "Done editing" : "Edit boxes: add, resize, move or rename rooms"}
+            </TooltipContent>
+          </Tooltip>
+
+          {editing && (
+            <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    ref={addButtonRef}
+                    size="icon"
+                    variant={drawMode && !freeformMode ? "default" : "outline"}
+                    className="h-7 w-7"
+                    onClick={(e) => {
+                      if (pendingBox) return;
+                      // Keyboard activation: drop a centred box.
+                      if (e.detail === 0 && !drawMode) {
+                        setSelectedRoomId(null);
+                        setFreeformMode(false);
+                        setPendingBox(centredBox());
+                        return;
+                      }
+                      setSelectedRoomId(null);
+                      setFreeformMode(false);
+                      setDrawMode((v) => !v);
+                    }}
+                    disabled={!!pendingBox}
+                    aria-label={drawMode && !freeformMode ? "Stop adding a box" : "Add a new room box (rectangle)"}
+                    aria-pressed={drawMode && !freeformMode}
+                  >
+                    <SquarePlus className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {drawMode && !freeformMode ? "Cancel rectangle draw" : "Rectangle draw: drag to draw a rectangular room box"}
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={freeformMode ? "default" : "outline"}
+                    className="h-7 w-7"
+                    onClick={() => {
+                      if (pendingBox) return;
+                      setDrawMode(false);
+                      setFreeformMode((v) => !v);
+                    }}
+                    disabled={!!pendingBox}
+                    aria-label={
+                      freeformMode
+                        ? "Stop freeform draw"
+                        : selectedRoom
+                        ? `Reshape ${selectedRoom.name} with freeform lasso`
+                        : "Freeform draw: trace any shape"
+                    }
+                    aria-pressed={freeformMode}
+                  >
+                    <Lasso className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {freeformMode
+                    ? "Cancel freeform mode"
+                    : selectedRoom
+                    ? `Reshape "${selectedRoom.name}" with freeform lasso`
+                    : "Freeform lasso: draw any shape or click a room to reshape it"}
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-7 w-7"
+                    disabled={!pendingShapeEdit && boxHistory.length === 0}
+                    onClick={handleUndoLastChange}
+                    aria-label="Undo shape change (Ctrl+Z)"
+                  >
+                    <Undo2 className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {pendingShapeEdit
+                    ? `Undo pending changes for ${pendingShapeEdit.roomName} (Esc / Ctrl+Z)`
+                    : boxHistory.length > 0
+                    ? `Undo change to ${boxHistory[boxHistory.length - 1].roomName} (Ctrl+Z)`
+                    : "Undo shape change (Ctrl+Z)"}
+                </TooltipContent>
+              </Tooltip>
+            </>
+          )}
 
           <div className="mx-1 h-5 w-px bg-border" />
 
@@ -473,7 +904,7 @@ export default function DrawingViewer({
                 />
               )}
 
-              {overlaysVisible && overlayLayer}
+              {onAnalysedSheet && overlayLayer}
             </div>
           </div>
         )}
@@ -483,6 +914,37 @@ export default function DrawingViewer({
           <div className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-card/90 px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground shadow-card backdrop-blur-sm">
             {isPdf && pdfPage !== 1 ? (
               "Highlights are shown on sheet 1"
+            ) : editing ? (
+              <span aria-live="polite">
+                <span className="font-semibold text-primary">
+                  {pendingShapeEdit
+                    ? "Review shape changes"
+                    : pendingBox
+                    ? "New room"
+                    : drawingFreeform
+                    ? selectedRoom
+                      ? `Reshaping ${selectedRoom.name}`
+                      : "Freeform lasso"
+                    : drawingBox
+                    ? "Adding a box"
+                    : "Editing"}
+                </span>
+                <span className="mx-1.5">·</span>
+                {pendingShapeEdit
+                  ? `Save or undo shape changes for "${pendingShapeEdit.roomName}" · Enter to save, Esc to undo`
+                  : pendingBox
+                  ? "Name the space to add it to the schedule"
+                  : drawingFreeform
+                  ? selectedRoom
+                    ? `Trace new boundaries for "${selectedRoom.name}" · Click outside to draw a new room · Esc to cancel`
+                    : "Draw freely to create a room, or click an existing room to reshape it · Esc to cancel"
+                  : drawingBox
+                  ? "Drag on the drawing to draw the new room · Esc to cancel"
+                  : "Drag to move · handles to resize · double-click to rename · + or lasso to add/reshape"}
+                {(isSaving || isCreating) && (
+                  <span className="ml-1.5 text-foreground">· Saving…</span>
+                )}
+              </span>
             ) : roomsWithBoxes.length > 0 ? (
               <>
                 {roomsWithBoxes.length} of {rooms.length} room

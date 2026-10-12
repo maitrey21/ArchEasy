@@ -28,13 +28,23 @@ export interface GeminiResult {
 }
 
 /**
- * Model preference order. Google returns 503 UNAVAILABLE ("high demand") on
- * popular models fairly often, so we fall back down this list rather than
- * failing the user's upload. `gemini-flash-latest` is an alias that tracks
- * whichever flash model is current, which also protects against a specific
- * version being retired.
+ * Model preference order; the list is tried in order and we fall back rather
+ * than failing the user's upload.
+ *
+ * `gemini-flash-latest` leads because it is the only model that actually
+ * serves this project's drawing-analysis requests: the pinned versions below
+ * return 429 (quota) within a second or two, while the alias completes a dense
+ * sheet in ~90s. Being an alias, it also tracks whichever flash model is
+ * current, so it survives a specific version being retired.
+ *
+ * The pinned versions stay as fallbacks for when the alias itself returns 503
+ * UNAVAILABLE ("high demand"), which Google does fairly often.
+ *
+ * Note: a 90s success only fits inside the time budget when
+ * FUNCTION_MAX_DURATION_S allows it (see heavyCallTimeoutMs below). On a 60s
+ * platform limit a drawing this dense will still be cut off.
  */
-export const GEMINI_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest"];
+export const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.5-flash"];
 
 /** Kept for callers that just want to report which model is preferred. */
 export const GEMINI_MODEL = GEMINI_MODELS[0];
@@ -134,6 +144,41 @@ function timeoutSignal(ms: number): AbortSignal {
 }
 
 /**
+ * Reads a fetch Response's body immediately and returns an equivalent,
+ * fully-buffered Response.
+ *
+ * Each attempt's fetch carries an abort timer. If the live Response is kept
+ * and its body read later (by the API handler, after callGemini returns), that
+ * read races the timer: once it fires, `response.text()` throws
+ * "Body is unusable: Body has already been read" and the request 500s.
+ * Buffering inside the attempt keeps the body read under the same timeout and
+ * makes the returned Response safe to read at any time.
+ */
+async function bufferResponse(res: Response): Promise<Response> {
+  const text = await res.text();
+  const nullBodyStatus = [101, 204, 205, 304].includes(res.status);
+  const contentType = res.headers.get("Content-Type");
+  return new Response(nullBodyStatus ? null : text, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: contentType ? { "Content-Type": contentType } : undefined,
+  });
+}
+
+/**
+ * Per-call cap for a slow, heavy Gemini request, scaled to the function budget.
+ *
+ * On Vercel's 60s limit this stays at 24s so a stuck model still leaves room to
+ * fail over to another one. With a larger budget (local dev, or a raised
+ * maxDuration) a single dense drawing gets up to 120s to finish, instead of
+ * being cut off at 24s on every model.
+ */
+export function heavyCallTimeoutMs(): number {
+  const budgetMs = FUNCTION_MAX_DURATION_S * 1000 - RESPONSE_RESERVE_MS;
+  return Math.min(120_000, Math.max(24_000, Math.round(budgetMs * 0.45)));
+}
+
+/**
  * Calls Gemini, absorbing the transient failures Google returns under load,
  * while guaranteeing a response inside the function's time budget.
  *
@@ -190,12 +235,14 @@ export async function callGemini(
       const timeoutMs = Math.max(4000, Math.min(perCallTimeoutMs, remaining - 1500));
 
       try {
-        const response = await fetch(GEMINI_ENDPOINT(model, apiKey), {
+        const raw = await fetch(GEMINI_ENDPOINT(model, apiKey), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body,
           signal: timeoutSignal(timeoutMs),
         });
+        // Read the body now, while this attempt's timeout still covers it.
+        const response = await bufferResponse(raw);
 
         if (response.ok) {
           console.log(`Gemini OK on ${model} (pass ${pass}) after ${Date.now() - started}ms`);

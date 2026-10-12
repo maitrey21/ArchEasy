@@ -11,40 +11,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Pencil, Check, X, Trash2 } from "lucide-react";
-
-interface Room {
-  id: string;
-  name: string;
-  floor_level: string | null;
-  space_tag: string | null;
-  room_type: string | null;
-  floor_finish: string | null;
-  flooring_size: string | null;
-  flooring_finish: string | null;
-  flooring_code: string | null;
-  flooring_make: string | null;
-  flooring_rate: string | null;
-  skirting: string | null;
-  skirting_code: string | null;
-  skirting_make: string | null;
-  skirting_rate: string | null;
-  ceiling_finish: string | null;
-  ceiling_material_2: string | null;
-  ceiling_size: string | null;
-  ceiling_code: string | null;
-  ceiling_make: string | null;
-  ceiling_rate: string | null;
-  wall_finish: string | null;
-  paint_color: string | null;
-  dado: string | null;
-  remark: string | null;
-  area: number | null;
-  area_unit: string | null;
-  ceiling_height: number | null;
-  notes: string | null;
-}
+import { Pencil, Trash2 } from "lucide-react";
+import RoomEditDialog from "@/components/RoomEditDialog";
+import type { Room } from "@/lib/types";
 
 interface Props {
   rooms: Room[];
@@ -113,20 +82,8 @@ export default function RoomTable({
 }: Props) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editData, setEditData] = useState<Partial<Room>>({});
-
-  const updateRoom = useMutation({
-    mutationFn: async ({ id, data }: { id: string; data: Partial<Room> }) => {
-      const { error } = await supabase.from("rooms").update(data).eq("id", id);
-      if (error) throw error;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["rooms", projectId] });
-      setEditingId(null);
-      toast({ title: "Room updated" });
-    },
-  });
+  const [editRoom, setEditRoom] = useState<Room | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
 
   const deleteRoom = useMutation({
     mutationFn: async (id: string) => {
@@ -139,20 +96,9 @@ export default function RoomTable({
     },
   });
 
-  const startEdit = (room: Room) => {
-    setEditingId(room.id);
-    setEditData(room);
-  };
-
-  const cancelEdit = () => {
-    setEditingId(null);
-    setEditData({});
-  };
-
-  const saveEdit = () => {
-    if (editingId) {
-      updateRoom.mutate({ id: editingId, data: editData });
-    }
+  const openEdit = (room: Room) => {
+    setEditRoom(room);
+    setEditOpen(true);
   };
 
   return (
@@ -217,42 +163,29 @@ export default function RoomTable({
                 </TableCell>
                 {allColumns.map((col) => (
                   <TableCell key={col.key} className="text-xs border-l border-border/20">
-                    {editingId === room.id ? (
-                      <Input
-                        value={String(editData[col.key as keyof Room] ?? "")}
-                        onChange={(e) =>
-                          setEditData({ ...editData, [col.key]: e.target.value })
-                        }
-                        className="h-7 text-xs min-w-[80px]"
-                      />
-                    ) : (
-                      <span className="text-foreground">
-                        {String(room[col.key as keyof Room] ?? "") || "—"}
-                      </span>
-                    )}
+                    <span className="text-foreground">
+                      {String(room[col.key as keyof Room] ?? "") || "—"}
+                    </span>
                   </TableCell>
                 ))}
                 <TableCell className="border-l border-border/20">
                   <div className="flex gap-1">
-                    {editingId === room.id ? (
-                      <>
-                        <Button variant="ghost" size="icon" onClick={saveEdit} className="h-6 w-6 text-primary">
-                          <Check className="h-3 w-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" onClick={cancelEdit} className="h-6 w-6">
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <Button variant="ghost" size="icon" onClick={() => startEdit(room)} className="h-6 w-6">
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button variant="ghost" size="icon" onClick={() => deleteRoom.mutate(room.id)} className="h-6 w-6 text-muted-foreground hover:text-destructive">
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </>
-                    )}
+                    <Button variant="ghost" size="icon" onClick={() => openEdit(room)} className="h-6 w-6" title="Edit room">
+                      <Pencil className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => {
+                        if (confirm("Delete this room? This cannot be undone.")) {
+                          deleteRoom.mutate(room.id);
+                        }
+                      }}
+                      className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                      title="Delete room"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
                   </div>
                 </TableCell>
               </TableRow>
@@ -260,6 +193,12 @@ export default function RoomTable({
           </TableBody>
         </Table>
       </div>
+      <RoomEditDialog
+        room={editRoom}
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        projectId={projectId}
+      />
     </div>
   );
 }

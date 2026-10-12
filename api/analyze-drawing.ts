@@ -15,6 +15,7 @@ import {
   extractText,
   parseAiJson,
   callGemini,
+  heavyCallTimeoutMs,
   type ApiRequest,
   type ApiResponse,
   type GeminiResult,
@@ -255,10 +256,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         },
       },
       GEMINI_API_KEY,
-      // Detection is the slowest call in the app: a dense sheet can take
-      // 20-40s on its own. Cap a single attempt so one overloaded model can't
-      // consume the whole budget, leaving room to fail over to another model.
-      { perCallTimeoutMs: 24000 }
+      // Detection is the slowest call in the app: a dense sheet can take 30s+
+      // on its own. The cap scales with the function budget: 24s on Vercel's
+      // 60s limit (leaving room to fail over), up to 120s when more is allowed.
+      { perCallTimeoutMs: heavyCallTimeoutMs() }
     );
 
     if (!response.ok) {

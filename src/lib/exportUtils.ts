@@ -1,6 +1,6 @@
-import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { downloadSofExcel } from "@/lib/sofExcel";
 
 interface Room {
   name: string;
@@ -33,6 +33,7 @@ interface Room {
   notes: string | null;
 }
 
+// Column layout used by the PDF exports.
 const groupHeaders = [
   "", "", "", "",
   "FLOORING", "", "", "", "", "",
@@ -75,170 +76,55 @@ function roomToRow(room: Room, idx: number) {
   ];
 }
 
-export function exportToExcel(rooms: Room[], projectName: string) {
-  const data = [
-    [projectName],
-    ["SCHEDULE OF FINISHES"],
-    groupHeaders,
-    subHeaders,
-    ...rooms.map((r, i) => roomToRow(r, i)),
-  ];
-
-  const ws = XLSX.utils.aoa_to_sheet(data);
-
-  // Merge group header cells
-  ws["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 20 } }, // Project name
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 20 } }, // Schedule title
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 3 } },  // Empty group
-    { s: { r: 2, c: 4 }, e: { r: 2, c: 9 } },  // FLOORING
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 13 } }, // SKIRTING
-    { s: { r: 2, c: 14 }, e: { r: 2, c: 19 } }, // CEILING
-  ];
-
-  ws["!cols"] = COLUMN_WIDTHS;
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Schedule of Finishes");
-  XLSX.writeFile(wb, `${projectName}_Schedule_of_Finishes.xlsx`);
-}
-
-// ---------------------------------------------------------------------------
-// Multi-floor exports
-//
-// These reuse roomToRow / groupHeaders / subHeaders above verbatim, so the
-// column mapping of the schedule is identical to the single-floor export.
-// ---------------------------------------------------------------------------
-
-const LAST_COL = subHeaders.length - 1;
-
-const COLUMN_WIDTHS = subHeaders.map((h) => ({
-  wch: h === "Sr.No" ? 6 : h === "Space Description" ? 22 : 14,
-}));
-
 export interface FloorSection {
   floorName: string;
   rooms: Room[];
 }
 
-/** Excel sheet names cannot exceed 31 chars or contain : \ / ? * [ ] */
-function safeSheetName(name: string, fallback: string): string {
-  const cleaned = name.replace(/[:\\/?*[\]]/g, "-").trim();
-  return (cleaned || fallback).slice(0, 31);
+// ---------------------------------------------------------------------------
+// Excel exports
+//
+// All three fill the practice's "FORMAT OF SOF FOR CORP. INT" template (see
+// sofExcel.ts), so every export has the template's exact columns, widths,
+// colours and dropdowns. Floors appear as lettered banner sections (A, B, ...)
+// in one sheet, the same way the template lays a project out.
+// ---------------------------------------------------------------------------
+
+/** Keeps file names valid on Windows/macOS. */
+function fileSafe(name: string): string {
+  return name.replace(/[\\/:*?"<>|]+/g, "-").trim().replace(/\s+/g, "_") || "Project";
 }
 
-/** Single floor -> one workbook. */
-export function exportFloorToExcel(rooms: Room[], projectName: string, floorName: string) {
-  const data = [
-    [projectName],
-    [`SCHEDULE OF FINISHES - ${floorName.toUpperCase()}`],
-    groupHeaders,
-    subHeaders,
-    ...rooms.map((r, i) => roomToRow(r, i)),
-  ];
-
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  ws["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: LAST_COL } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: LAST_COL } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 3 } },
-    { s: { r: 2, c: 4 }, e: { r: 2, c: 9 } },
-    { s: { r: 2, c: 10 }, e: { r: 2, c: 13 } },
-    { s: { r: 2, c: 14 }, e: { r: 2, c: 19 } },
-  ];
-  ws["!cols"] = COLUMN_WIDTHS;
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, safeSheetName(floorName, "Floor"));
-  XLSX.writeFile(wb, `${projectName}_${floorName}_Schedule_of_Finishes.xlsx`.replace(/\s+/g, "_"));
+/** Rooms without a known floor -> one workbook (single section). */
+export function exportToExcel(rooms: Room[], projectName: string): Promise<void> {
+  const floorName = rooms.find((r) => r.floor_level?.trim())?.floor_level ?? "All Spaces";
+  return downloadSofExcel(
+    [{ floorName, rooms }],
+    projectName,
+    `${fileSafe(projectName)}_Schedule_of_Finishes.xlsx`
+  );
 }
 
-/**
- * Whole project -> one workbook with a combined floor-wise sheet plus one
- * sheet per floor.
- */
-export function exportProjectToExcel(sections: FloorSection[], projectName: string) {
-  const wb = XLSX.utils.book_new();
+/** Single floor -> one workbook with that floor's section. */
+export function exportFloorToExcel(
+  rooms: Room[],
+  projectName: string,
+  floorName: string
+): Promise<void> {
+  return downloadSofExcel(
+    [{ floorName, rooms }],
+    projectName,
+    `${fileSafe(projectName)}_${fileSafe(floorName)}_Schedule_of_Finishes.xlsx`
+  );
+}
 
-  // --- Combined sheet: floor-wise sections stacked with banner rows ---
-  const combined: (string | number)[][] = [
-    [projectName],
-    ["SCHEDULE OF FINISHES - COMPLETE PROJECT"],
-    [],
-  ];
-  const merges: XLSX.Range[] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: LAST_COL } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: LAST_COL } },
-  ];
-
-  sections.forEach((section) => {
-    // Floor banner
-    merges.push({ s: { r: combined.length, c: 0 }, e: { r: combined.length, c: LAST_COL } });
-    combined.push([`${section.floorName.toUpperCase()} — ${section.rooms.length} room(s)`]);
-
-    // Group header row
-    merges.push(
-      { s: { r: combined.length, c: 0 }, e: { r: combined.length, c: 3 } },
-      { s: { r: combined.length, c: 4 }, e: { r: combined.length, c: 9 } },
-      { s: { r: combined.length, c: 10 }, e: { r: combined.length, c: 13 } },
-      { s: { r: combined.length, c: 14 }, e: { r: combined.length, c: 19 } }
-    );
-    combined.push([...groupHeaders]);
-    combined.push([...subHeaders]);
-
-    if (section.rooms.length === 0) {
-      combined.push(["", "", "No rooms detected on this floor"]);
-    } else {
-      // Numbering restarts per floor, matching the per-floor schedule.
-      section.rooms.forEach((room, i) => combined.push(roomToRow(room, i)));
-    }
-
-    combined.push([]);
-  });
-
-  const totalRooms = sections.reduce((sum, s) => sum + s.rooms.length, 0);
-  merges.push({ s: { r: combined.length, c: 0 }, e: { r: combined.length, c: LAST_COL } });
-  combined.push([`TOTAL: ${totalRooms} room(s) across ${sections.length} floor(s)`]);
-
-  const combinedWs = XLSX.utils.aoa_to_sheet(combined);
-  combinedWs["!merges"] = merges;
-  combinedWs["!cols"] = COLUMN_WIDTHS;
-  XLSX.utils.book_append_sheet(wb, combinedWs, "Complete Project");
-
-  // --- One sheet per floor ---
-  const usedNames = new Set<string>(["Complete Project"]);
-  sections.forEach((section, idx) => {
-    const data = [
-      [projectName],
-      [`SCHEDULE OF FINISHES - ${section.floorName.toUpperCase()}`],
-      groupHeaders,
-      subHeaders,
-      ...section.rooms.map((r, i) => roomToRow(r, i)),
-    ];
-
-    const ws = XLSX.utils.aoa_to_sheet(data);
-    ws["!merges"] = [
-      { s: { r: 0, c: 0 }, e: { r: 0, c: LAST_COL } },
-      { s: { r: 1, c: 0 }, e: { r: 1, c: LAST_COL } },
-      { s: { r: 2, c: 0 }, e: { r: 2, c: 3 } },
-      { s: { r: 2, c: 4 }, e: { r: 2, c: 9 } },
-      { s: { r: 2, c: 10 }, e: { r: 2, c: 13 } },
-      { s: { r: 2, c: 14 }, e: { r: 2, c: 19 } },
-    ];
-    ws["!cols"] = COLUMN_WIDTHS;
-
-    // Guarantee a unique, Excel-legal sheet name.
-    let name = safeSheetName(section.floorName, `Floor ${idx + 1}`);
-    let suffix = 2;
-    while (usedNames.has(name)) {
-      name = safeSheetName(`${section.floorName} ${suffix++}`, `Floor ${idx + 1}`);
-    }
-    usedNames.add(name);
-
-    XLSX.utils.book_append_sheet(wb, ws, name);
-  });
-
-  XLSX.writeFile(wb, `${projectName}_Project_Schedule_of_Finishes.xlsx`.replace(/\s+/g, "_"));
+/** Whole project -> one workbook, one lettered section per floor. */
+export function exportProjectToExcel(sections: FloorSection[], projectName: string): Promise<void> {
+  return downloadSofExcel(
+    sections,
+    projectName,
+    `${fileSafe(projectName)}_Project_Schedule_of_Finishes.xlsx`
+  );
 }
 
 export function exportToPDF(rooms: Room[], projectName: string) {

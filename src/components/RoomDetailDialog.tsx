@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -5,7 +6,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import { Layers, Ruler, StickyNote } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Layers, Ruler, StickyNote, Pencil } from "lucide-react";
 import {
   ROOM_FIELD_GROUPS,
   fieldValue,
@@ -14,11 +16,13 @@ import {
   EMPTY_VALUE,
 } from "@/lib/roomFields";
 import type { Room } from "@/lib/types";
+import RoomEditDialog from "@/components/RoomEditDialog";
 
 interface Props {
   room: Room | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  projectId: string;
 }
 
 /**
@@ -26,20 +30,32 @@ interface Props {
  * Same data as the Excel table, grouped into Flooring / Skirting / Ceiling /
  * Walls with a clear hierarchy instead of one wide row.
  */
-export default function RoomDetailDialog({ room, open, onOpenChange }: Props) {
+export default function RoomDetailDialog({ room, open, onOpenChange, projectId }: Props) {
+  const [editOpen, setEditOpen] = useState(false);
+
   if (!room) return null;
 
   const area = room.area ? `${room.area} ${room.area_unit ?? "sq ft"}` : null;
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <div className="flex flex-wrap items-center gap-2 pr-6">
-            <DialogTitle className="text-lg">{room.name}</DialogTitle>
+            <DialogTitle className="text-lg flex-1">{room.name}</DialogTitle>
             <Badge variant="outline" className="border-primary/20 bg-primary/10 text-primary">
               {roomTypeLabel(room.room_type)}
             </Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 h-7 text-xs"
+              onClick={() => { onOpenChange(false); setEditOpen(true); }}
+            >
+              <Pencil className="h-3 w-3" />
+              Edit
+            </Button>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
             {room.floor_level && (
@@ -119,5 +135,12 @@ export default function RoomDetailDialog({ room, open, onOpenChange }: Props) {
         </div>
       </DialogContent>
     </Dialog>
+    <RoomEditDialog
+      room={room}
+      open={editOpen}
+      onOpenChange={setEditOpen}
+      projectId={projectId}
+    />
+    </>
   );
 }

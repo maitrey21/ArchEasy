@@ -1,13 +1,19 @@
 import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { DoorOpen, Layers, ChevronRight, Grid2x2, PaintBucket } from "lucide-react";
+import { DoorOpen, Layers, ChevronRight, Grid2x2, PaintBucket, Pencil, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import RoomDetailDialog from "@/components/RoomDetailDialog";
+import RoomEditDialog from "@/components/RoomEditDialog";
 import { roomTypeLabel, finishSummary } from "@/lib/roomFields";
 import type { Room } from "@/lib/types";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 interface Props {
   rooms: Room[];
+  projectId: string;
   highlightedRoomId?: string | null;
   onHighlightRoom?: (id: string | null) => void;
   /** Optional grouping banner (used in the whole-project view). */
@@ -45,16 +51,48 @@ function typeAccent(roomType: string | null): string {
 
 export default function RoomWiseView({
   rooms,
+  projectId,
   highlightedRoomId,
   onHighlightRoom,
   groupLabel,
 }: Props) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [selected, setSelected] = useState<Room | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editRoom, setEditRoom] = useState<Room | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
 
   const openRoom = (room: Room) => {
     setSelected(room);
     setDialogOpen(true);
+  };
+
+  const openEdit = (e: React.MouseEvent, room: Room) => {
+    e.stopPropagation();
+    setEditRoom(room);
+    setEditOpen(true);
+  };
+
+  const deleteRoom = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from("rooms").delete().eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["rooms", projectId] });
+      toast({ title: "Room deleted" });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  const handleDelete = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    if (confirm("Delete this room? This cannot be undone.")) {
+      deleteRoom.mutate(id);
+    }
   };
 
   return (
@@ -140,12 +178,46 @@ export default function RoomWiseView({
               <p className="mt-3 line-clamp-1 border-t border-border/60 pt-2 text-[11px] text-muted-foreground">
                 {finishSummary(room)}
               </p>
+
+              {/* Action buttons — visible on hover */}
+              <div className="mt-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 gap-1 px-2 text-[10px]"
+                  onClick={(e) => openEdit(e, room)}
+                >
+                  <Pencil className="h-2.5 w-2.5" />
+                  Edit
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 gap-1 px-2 text-[10px] text-muted-foreground hover:text-destructive"
+                  onClick={(e) => handleDelete(e, room.id)}
+                  disabled={deleteRoom.isPending}
+                >
+                  <Trash2 className="h-2.5 w-2.5" />
+                  Delete
+                </Button>
+              </div>
             </motion.button>
           );
         })}
       </div>
 
-      <RoomDetailDialog room={selected} open={dialogOpen} onOpenChange={setDialogOpen} />
+      <RoomDetailDialog
+        room={selected}
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        projectId={projectId}
+      />
+      <RoomEditDialog
+        room={editRoom}
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        projectId={projectId}
+      />
     </div>
   );
 }

@@ -50,7 +50,7 @@ import {
   exportProjectToExcel,
   exportProjectToPDF,
 } from "@/lib/exportUtils";
-import type { Drawing, Room } from "@/lib/types";
+import { errorMessage, type Drawing, type Room } from "@/lib/types";
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -212,18 +212,28 @@ export default function ProjectDetail() {
     setMobileSidebarOpen(false);
   };
 
-  // Excel/PDF exports default to the ENTIRE project (every floor). The project
-  // workbook has a combined floor-wise sheet plus one sheet per floor; the PDF
-  // has one page per floor plus a summary — so a single file covers everything.
+  // Excel/PDF exports default to the ENTIRE project (every floor). The Excel
+  // workbook follows the practice's SOF template: one sheet with a lettered
+  // section per floor. The PDF has one page per floor plus a summary.
   const totalProjectRooms = rooms.length;
 
-  const handleExportExcel = () => exportProjectToExcel(floorSections, projectName);
+  /** Excel export loads the template asynchronously, so surface failures. */
+  const runExcelExport = (task: () => Promise<void>) => {
+    task().catch((err: unknown) =>
+      toast({ title: "Excel export failed", description: errorMessage(err), variant: "destructive" })
+    );
+  };
+
+  const handleExportExcel = () =>
+    runExcelExport(() => exportProjectToExcel(floorSections, projectName));
   const handleExportPDF = () => exportProjectToPDF(floorSections, projectName);
 
-  const handleExportFloorExcel = () => {
-    if (activeFloor) exportFloorToExcel(floorRooms, projectName, activeFloor.name);
-    else exportToExcel(floorRooms, projectName);
-  };
+  const handleExportFloorExcel = () =>
+    runExcelExport(() =>
+      activeFloor
+        ? exportFloorToExcel(floorRooms, projectName, activeFloor.name)
+        : exportToExcel(floorRooms, projectName)
+    );
   const handleExportFloorPDF = () => {
     if (activeFloor) exportFloorToPDF(floorRooms, projectName, activeFloor.name);
     else exportToPDF(floorRooms, projectName);
@@ -504,6 +514,7 @@ export default function ProjectDetail() {
                         ) : scheduleView === "cards" ? (
                           <RoomWiseView
                             rooms={section.rooms}
+                            projectId={id!}
                             groupLabel={section.floorName}
                             highlightedRoomId={highlightedRoomId}
                             onHighlightRoom={setHighlightedRoomId}
@@ -536,6 +547,7 @@ export default function ProjectDetail() {
                   rooms={viewerRooms}
                   highlightedRoomId={highlightedRoomId}
                   onHighlightRoom={setHighlightedRoomId}
+                  floorName={activeFloor?.name}
                 />
 
                 <Tabs defaultValue="schedule">
@@ -574,6 +586,7 @@ export default function ProjectDetail() {
                         {scheduleView === "cards" ? (
                           <RoomWiseView
                             rooms={floorRooms}
+                            projectId={id!}
                             highlightedRoomId={highlightedRoomId}
                             onHighlightRoom={setHighlightedRoomId}
                           />
